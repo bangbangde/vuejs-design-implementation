@@ -1,0 +1,240 @@
+<html>
+<head>
+  <script src="https://unpkg.com/@vue/reactivity@3.0.5/dist/reactivity.global.js"></script>
+</head>
+<body>
+<div id="app"></div>
+<script>
+  const { effect, ref } = VueReactivity;
+  const container = document.getElementById('app');
+
+  function createRenderer({ createElement, setElementText, insert, patchProps } = {}) {
+    // 默认使用 DOM API
+    !createElement && (createElement = function (tag) {
+      return document.createElement(tag)
+    })
+
+    !setElementText && (setElementText = function (el, text) {
+      el.textContent = text
+    })
+
+    !insert && (insert = function (el, parent, anchor = null) {
+      parent.insertBefore(el, anchor)
+    })
+
+    !patchProps && (patchProps = function (node, key, prevValue, nextValue) {
+      // 处理事件
+      if (/^on/.test(key)) {
+        const invokers = node._vei || (node._vei = {})
+        let invoker = invokers[key]
+        const name = key.slice(2).toLowerCase() // 假设所有事件名称都市以 on 开头
+        if (nextValue) {
+          if (!invoker) {
+            invoker = node._vei = e => {
+              if (e.performanceTime < invoker.attached) return
+              if(Array.isArray(invoker.value)) {
+                invoker.value.forEach(fn => fn(e))
+              } else {
+                invoker.value(e)
+              }
+            }
+            invoker.value = nextValue
+            invoker.attached = performance.now()
+            node.addEventListener(name, invoker)
+          } else {
+            invoker.value = nextValue
+          }
+        } else if(invoker) {
+          node.removeEventListener(name, invoker)
+          delete invokers[key]
+        }
+      }
+      if (key === 'class') {
+        node.classname = normalizeClass(nextValue) || '';
+      } else {
+        if (shouldSetAsProps(node, key, nextValue)) {
+          const type = typeof nextValue;
+          if (type === 'boolean' && nextValue === '') {
+            node[key] = true
+          } else {
+            node[key] = nextValue
+          }
+        } else {
+          el.setAttribute(key, nextValue)
+        }
+      }
+    })
+
+    function shouldSetAsProps(el, key, value) {
+      if (key === 'form' && el.tagName === 'INPUT') return false;
+      return key in el;
+    }
+
+    function normalizeClass(clz) {
+      if (typeof clz === 'string') {
+        return clz
+      } else if (Array.isArray(clz)) {
+        return clz.map(normalizeClass).join(' ')
+      } else if (typeof clz === 'object') {
+        return Object.keys(clz).filter(k => clz[k]).join(' ')
+      } else if (clz == null) {
+        return ''
+      }
+      return clz + '';
+    }
+
+    /**
+     * 挂载元素
+     * @param vnode
+     * @param container
+     */
+    function mountElement(vnode, container) {
+      const {type, props, children} = vnode
+      const node = vnode.el = createElement(type)
+
+      // 设置属性
+      if(props) {
+        for(let [k, v] of Object.entries(props)) {
+          patchProps(node, k, null, v)
+        }
+      }
+
+      // 处理子元素
+      if (typeof children === 'string') {
+        setElementText(node, children)
+      } else if(Array.isArray(children)) {
+        children.forEach(vnode => {
+          mountElement(vnode, node);
+        })
+      }
+
+      insert(node, container)
+    }
+
+    /**
+     * diff 算法
+     * @param n1
+     * @param n2
+     * @param container
+     */
+    function patchChildren(n1, n2, container) {
+      if (typeof n2.children === 'string') {
+        if (Array.isArray(n1.children)) {
+          n1.children.forEach(c => unmount(c))
+        }
+        setElementText(container, n2.children)
+      } else if (Array.isArray(n2.children)) {
+        if (Array.isArray(n1.children)) {
+          // 介里就是最核心的 diff 算法
+        } else {
+          setElementText(container, '')
+          n2.children.forEach(c => patch(null, c, container))
+        }
+      } else {
+        if (Array.isArray(n1.children)) {
+          n1.children.forEach(c => unmount(c))
+        } else if(typeof n1.children === 'string') {
+          setElementText(container, '')
+        }
+      }
+    }
+
+    // 重要操作都在这里：找补算法
+    function patchElement(n1, n2) {
+      const {children, props} = n2;
+      const el = n2.el = n1.el;
+      const oldProps = n1.props;
+      // 更新 props
+      for (const key in props) {
+        if (props[key] !== oldProps[key]) {
+          patchProps(el, key, oldProps[key], props[key])
+        }
+      }
+      for (const key in oldProps) {
+        if (!(key in props)) {
+          patchProps(el, key, oldProps[key], null)
+        }
+      }
+      // 更新 children
+      patchChildren(n1, n2, el)
+    }
+
+    /**
+     * 根据 vnode 更新 dom
+     * @param n1 { VNode } # 上一次的 vnode
+     * @param n2 { VNode } # 新的 vnode
+     * @param container
+     */
+    function patch(n1, n2, container) {
+      if (n1 && n1.type !== n2.type) {
+        unmount(n1)
+        n1 = null // 往下继续走挂载流程
+      }
+      if (!n1) {
+        // n1 不存在说明是第一次挂载
+        mountElement(n2, container)
+      } else {
+        const {type} = n2
+        if (typeof type === 'string') {
+          if (!n1) {
+            mountElement(n2, container)
+          } else {
+            patchElement(n1, n2)
+          }
+        }
+        // 其他（func obj 等类型）
+      }
+    }
+
+    function unmount(vnode) {
+      const parent = vnode.el.parentNode
+      if (parent) {
+        parent.removeChild(vnode.el);
+      }
+    }
+
+    /**
+     * 渲染函数
+     * @param vnode { VNode } 虚拟DOM节点
+     * @param container
+     */
+    function render(vnode, container) {
+      if (vnode) {
+        patch(container._vnode, vnode, container);
+      } else {
+        if (container._vnode) {
+          // 清理 dom
+          // 组件生命周期回调
+          // 事件监听器解绑
+          // 指令
+          unmount(container._vnode)
+        }
+        // 都不存在当然就啥都不用做
+      }
+      // 把 vnode 挂到 dom 上
+      container._vnode = vnode;
+    }
+
+    return {
+      render
+    }
+  }
+
+  const renderer = createRenderer();
+  const count = ref(0);
+  effect(() => {
+    // 第一次挂载，后续更新
+    renderer.render({
+      type: 'h1',
+      props: {
+        style: 'color: red;'
+      },
+      children: 'hello world: ' + count.value
+    }, container)
+  });
+  // setInterval(() => {
+  //   count.value++
+  // }, 1000)
+</script>
+</body>
+</html>
